@@ -253,6 +253,15 @@
   }
   function catModeOfApp(id) { var c = catOfApp(id); return c ? c.m : "t"; }
   function catLimitOfApp(id) { var c = catOfApp(id); return c && typeof c.l === "number" ? c.l : null; }
+  // 앱의 지금(노트북) 실제 방식: '카테고리 따름'이면 그 카테고리의 노트북 값 (규칙 빼기 ⚠️ 에 씀)
+  function appModeOf(id) {
+    var a = S.base["app:" + id];
+    if (!a) return null;
+    if (a.m !== "f") return a.m;
+    var apps = Array.isArray(D("apps").apps) ? D("apps").apps : [];
+    for (var i = 0; i < apps.length; i++) if (apps[i] && apps[i].id === id) { var c = S.base["cat:" + apps[i].c]; return c ? c.m : "t"; }
+    return "t";
+  }
 
   function update(key, value) {
     S.cur[key] = value;
@@ -268,7 +277,7 @@
   var bar = {};
   var fresh = {};
 
-  var SEC_SHORT = { time: "시간", apps: "앱", sites: "사이트", opts: "알림" };
+  var SEC_SHORT = { time: "시간", apps: "앱", sites: "사이트", prot: "보호", cap: "화면 기록", opts: "기타" };
 
   // 구역별 바뀐 것과 오류: [{sec, d, ch, errs}] (SECTIONS 순서)
   function changesBySec() {
@@ -298,7 +307,7 @@
         t.btn.setAttribute("aria-label", t.label + (ne ? " (고칠 곳 있음)" : c ? " (바뀜)" : ""));
       }
     });
-    var ctx = { catMode: catModeOfApp, catLimit: catLimitOfApp };
+    var ctx = { catMode: catModeOfApp, catLimit: catLimitOfApp, appMode: appModeOf };
     Object.keys(S.regs).forEach(function (k) {
       var r = S.regs[k];
       var changed = k in ch;
@@ -422,6 +431,57 @@
     refresh();
     showFreshMsg("새 값을 요청했습니다. 텔레그램 대화에 오는 새 버튼을 눌러 주세요.", "good");
     showBarMsg("", "");
+  }
+
+  // 🔍 노트북에서 앱 찾기 (v0.10.0 §8). 저장 안 한 변경이 있으면 한 번 더 눌러야 한다 (최신 값 받기와 같게).
+  var searchState = { armed: false };
+  function onSearch(q, msg) {
+    if (S.sent) return;
+    var t = C.searchText(q, D("apps").sid);
+    if (t.error) { showSearchMsg(msg, t.error, "bad"); return; }
+    if (S.changed > 0 && !searchState.armed) {
+      searchState.armed = true;
+      showSearchMsg(msg, "바꾼 것은 저장되지 않습니다. 한 번 더 누르면 찾습니다", "bad");
+      return;
+    }
+    setClosingGuard(false);
+    if (!postEvent("web_app_data_send", { data: t.text })) {
+      searchState.armed = false;
+      showSearchMsg(msg, "텔레그램에 보내지 못했습니다. 텔레그램에서 /settings 를 다시 보내 주세요.", "bad");
+      return;
+    }
+    S.sent = true;
+    if (fresh.btn) fresh.btn.disabled = true;
+    refresh();
+    showSearchMsg(msg, "찾기를 보냈습니다. 텔레그램 대화에 오는 새 버튼을 눌러 주세요.", "good");
+    showBarMsg("", "");
+  }
+  function showSearchMsg(msg, text, kind) {
+    msg.textContent = text;
+    msg.hidden = !text;
+    msg.className = "search-msg" + (kind ? " " + kind : "");
+  }
+  function searchBox(shown, more, aq) {
+    var box = el("div", "lsearch");
+    var msg = el("p", "search-msg");
+    msg.hidden = true;
+    if (aq) {
+      box.appendChild(el("p", "note", "🔍 '" + aq + "' 이(가) 들어간 앱 " + (shown + (more || 0)) + "개 (노트북에서 찾음)"));
+      box.appendChild(button("전체 목록으로", "btn-light", function () { onSearch("", msg); }));
+    } else {
+      box.appendChild(el("p", "hint", "앱이 많아 이 버튼에 다 담지 못했습니다. 이름으로 찾으면 노트북이 찾은 앱만 담은 버튼을 새로 보냅니다 (이 화면은 닫힙니다)."));
+    }
+    var inp = el("input", "text");
+    inp.type = "search";
+    inp.maxLength = C.MAX_QUERY;
+    inp.placeholder = "노트북에서 찾을 앱 이름";
+    inp.setAttribute("aria-label", "노트북에서 찾을 앱 이름");
+    inp.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); go(); } });
+    function go() { if (inp.value.trim()) onSearch(inp.value, msg); }
+    var row = el("div", "addrow");
+    add(row, inp, button("🔍 찾기", "btn-light", go));
+    add(box, row, msg);
+    return box;
   }
 
   // ---------- 구역별 화면 ----------
@@ -593,21 +653,66 @@
     });
     main.appendChild(cats);
 
+    var dApps = D("apps");
     var appsCard = card("앱", null);
-    var apps = Array.isArray(D("apps").apps) ? D("apps").apps : [];
+    var apps = Array.isArray(dApps.apps) ? dApps.apps : [];
+    var more = C.intOrNull(dApps.more);
+    var aq = typeof dApps.aq === "string" ? C.safeText(dApps.aq).slice(0, C.MAX_QUERY) : null;
     var followOpts = [];
+    var appRows = [];
+    // 🔍 노트북에서 찾기 (v0.10.0 §8): 앱이 많아 다 담지 못했거나, 이미 검색 결과 버튼이면.
+    // 예전(v0.9.x) 노트북(짧은 앱 줄을 보내지 않음 → dApps.del 없음)은 찾기 글을 받지 않으므로 보여 주지 않는다.
+    var canSearch = dApps.del === true || !!aq;
+    if (canSearch && ((more !== null && more > 0) || aq)) appsCard.appendChild(searchBox(apps.length, more, aq));
     if (apps.length > 8) {
       var search = el("input", "search");
       search.type = "search";
-      search.placeholder = "앱 이름 찾기";
-      search.setAttribute("aria-label", "앱 이름 찾기");
+      search.placeholder = "이 목록에서 앱 이름 찾기";
+      search.setAttribute("aria-label", "이 목록에서 앱 이름 찾기");
       appsCard.appendChild(search);
       search.addEventListener("input", function () {
         var q = search.value.trim().toLowerCase();
         appRows.forEach(function (r) { r.box.hidden = !!q && r.name.toLowerCase().indexOf(q) < 0; });
       });
     }
-    var appRows = [];
+    // 여러 앱 한꺼번에 바꾸기 (v0.10.0): 고른 앱마다 app:<id> 를 보낸다 (새 키 없음)
+    var bulk = { on: false };
+    var bulkBar = el("div", "bulk");
+    bulkBar.hidden = true;
+    var bulkCount = el("span", "bulk-count", "고른 앱 0개");
+    var bulkMode = "b";
+    var bulkSel = select([["f", "카테고리 따름"], ["t", "시간 제한"], ["a", "항상 허용"], ["b", "사용 불가"]], bulkMode, function (v) { bulkMode = v; }, "고른 앱 방식");
+    var bulkApply = button("고른 앱에 적용", "btn-light", function () {
+      var n = 0;
+      appRows.forEach(function (r) {
+        if (!r.cb || !r.cb.checked || S.cur[r.del] === true) return;
+        r.setMode(bulkMode);
+        n++;
+      });
+      bulkCount.textContent = n ? n + "개 앱을 바꿨습니다" : "고른 앱이 없습니다";
+    });
+    var bulkAll = button("보이는 앱 모두 고르기", "btn-light", function () {
+      appRows.forEach(function (r) { if (r.cb && !r.box.hidden && S.cur[r.del] !== true) r.cb.checked = true; });
+      countSel();
+    });
+    function countSel() {
+      var n = 0;
+      appRows.forEach(function (r) { if (r.cb && r.cb.checked) n++; });
+      bulkCount.textContent = "고른 앱 " + n + "개";
+    }
+    var bulkRow = el("div", "bulk-row");
+    add(bulkRow, bulkCount, bulkAll, bulkApply);
+    add(bulkBar, fieldRow("방식", bulkSel), bulkRow);
+    var editable = apps.some(function (a) { return a && typeof a.id === "string" && a.ro !== true; });
+    if (editable) {
+      var bulkBtn = button("☑️ 여러 앱 한꺼번에 바꾸기", "btn-light", function () {
+        bulk.on = !bulk.on;
+        bulkBar.hidden = !bulk.on;
+        bulkBtn.textContent = bulk.on ? "☑️ 한꺼번에 바꾸기 닫기" : "☑️ 여러 앱 한꺼번에 바꾸기";
+        appRows.forEach(function (r) { if (r.pick) r.pick.hidden = !bulk.on; });
+      });
+      add(appsCard, bulkBtn, bulkBar);
+    }
     apps.forEach(function (a) {
       if (!a || typeof a.id !== "string") return;
       var name = C.safeText(a.n || a.id);
@@ -615,15 +720,15 @@
       var head = el("div", "app-head");
       add(head, el("span", "app-name", name), el("span", "app-cat", C.safeText(a.c || "")));
       row.appendChild(head);
-      appRows.push({ box: row, name: name });
       if (a.ro === true) {
         var dis = select([[a.m || "f", a.m === "f" ? "카테고리 따름" : (Object.prototype.hasOwnProperty.call(MODE_TEXT, a.m) ? MODE_TEXT[a.m] : C.safeText(a.m))]], a.m || "f", function () {}, name + " 방식");
         dis.disabled = true;
         add(row, fieldRow("방식", dis), el("p", "hint ro", "보안 기본 규칙이라 부모 관리 앱에서만 바꿀 수 있습니다"));
+        appRows.push({ box: row, name: name });
         appsCard.appendChild(row);
         return;
       }
-      var key = "app:" + a.id;
+      var key = "app:" + a.id, delKey = "del:" + a.id;
       var lim = limitPicker(key, name);
       lim.hidden = S.cur[key].m === "a" || S.cur[key].m === "b";
       var opts = [["f", followText(a.c)], ["t", "시간 제한"], ["a", "항상 허용"], ["b", "사용 불가"]];
@@ -632,14 +737,46 @@
         lim.hidden = m === "a" || m === "b";
       }, name + " 방식");
       followOpts.push({ opt: sel.options[0], cat: a.c });
+      var pick = el("label", "pick");
+      var cb = el("input");
+      cb.type = "checkbox";
+      cb.setAttribute("aria-label", name + " 고르기");
+      cb.addEventListener("change", countSel);
+      add(pick, cb, el("span", null, "고르기"));
+      pick.hidden = true;
+      head.insertBefore(pick, head.firstChild);
       add(row, fieldRow("방식", sel), lim);
       register(key, row);
+      var r = { box: row, name: name, key: key, del: delKey, cb: cb, pick: pick, sel: sel };
+      r.setMode = function (m) { sel.value = m; update(key, { m: m, l: S.cur[key].l }); lim.hidden = m === "a" || m === "b"; };
+      if (delKey in S.cur) {
+        // 규칙 빼기 (v0.10.0): 고르면 이 앱의 바꾼 값은 되돌린다 (노트북은 둘을 함께 받지 않음)
+        var delBox = el("div", "del-box");
+        var delBtn = button("규칙 빼기", "btn-x btn-x-small", function () {
+          var on = S.cur[delKey] !== true;
+          if (on) {
+            S.cur[key] = C.clone(S.base[key]);
+            sel.value = S.cur[key].m;
+            lim.hidden = S.cur[key].m === "a" || S.cur[key].m === "b";
+            cb.checked = false;
+          }
+          sel.disabled = on;
+          row.classList.toggle("deleted", on);
+          delBtn.textContent = on ? "되돌리기" : "규칙 빼기";
+          update(delKey, on);
+        });
+        delBtn.setAttribute("aria-label", name + " 규칙 빼기");
+        add(delBox, el("span", "hint", "이 앱 규칙을 노트북에서 뺍니다"), delBtn);
+        row.appendChild(delBox);
+        register(delKey, delBox);
+      }
+      appRows.push(r);
       appsCard.appendChild(row);
     });
-    if (!apps.length) appsCard.appendChild(el("p", "hint", "아직 관리하는 앱이 없습니다."));
-    var more = C.intOrNull(D("apps").more);
+    if (!apps.length) appsCard.appendChild(el("p", "hint", aq ? "'" + aq + "' 이(가) 들어간 앱이 없습니다." : "아직 관리하는 앱이 없습니다."));
     if (more !== null && more > 0) {
-      appsCard.appendChild(el("p", "note", "앱이 많아 이름순 " + apps.length + "개만 보여 줍니다. 나머지 " + more + "개는 부모 관리 앱에서 바꿔 주세요."));
+      appsCard.appendChild(el("p", "note", (aq ? "찾은 앱이 많아 " : "앱이 많아 ") + "이름순 " + apps.length + "개만 보여 줍니다. 나머지 " + more + "개는 " +
+        (canSearch ? "위 🔍 로 이름을 찾거나 " : "") + "부모 관리 앱에서 바꿔 주세요."));
     }
     main.appendChild(appsCard);
 
@@ -727,16 +864,127 @@
     main.appendChild(siteListEditor("bl", "차단 사이트", "이 사이트는 열 수 없습니다.", "예: youtube.com"));
     main.appendChild(siteListEditor("al", "허용 사이트", "다른 차단보다 먼저 허용합니다.", "예: school.go.kr"));
 
-    // 텔레그램·자동으로 막은 사이트: 개수만 (사이트 이름은 방문 기록이라 화면에 보내지 않는다, 설계 §1.8). 읽기 전용.
+    // 텔레그램·자동으로 막은 사이트: v0.10.0 노트북은 목록(exl)을 보내고 [풀기] = unb. 예전 노트북은 개수(exn)만 (읽기 전용).
     var exn = C.intOrNull(D("sites").exn);
-    if (exn !== null && exn > 0) {
+    if ("unb" in S.cur) main.appendChild(extraCard(C.normExtra(D("sites").exl), exn));
+    else if (exn !== null && exn > 0) {
       main.appendChild(el("p", "note exn", "텔레그램·자동으로 막은 사이트 " + exn + "곳 – 풀려면 막힌 사이트 알림의 [풀기] 버튼이나 부모 관리 앱을 쓰세요."));
     }
   }
 
+  function extraCard(list, exn) {
+    var c = card("텔레그램·자동으로 막은 사이트", "[풀기]를 누르고 저장하면 다시 열 수 있습니다.");
+    var ul = el("ul", "slist");
+    if (!list.length) ul.appendChild(el("li", "hint", exn !== null && exn > 0 ? "목록이 길어 이 버튼에 담지 못했습니다" : "없음"));
+    list.forEach(function (x) {
+      var li = el("li", "srow");
+      var txt = el("span", "ex-text");
+      add(txt, el("span", "site", C.safeText(x.s)), el("span", "sub", (x.d ? x.d + " · " : "") + (x.t ? "텔레그램에서 막음" : "자동으로 막음")));
+      var b = button("풀기", "btn-light btn-unb", function () {
+        var cur = S.cur.unb.slice();
+        var i = cur.indexOf(x.s);
+        if (i >= 0) cur.splice(i, 1); else cur.push(x.s);
+        b.textContent = i >= 0 ? "풀기" : "되돌리기";
+        li.classList.toggle("deleted", i < 0);
+        update("unb", cur);
+      });
+      b.setAttribute("aria-label", C.safeText(x.s) + " 풀기");
+      add(li, txt, b);
+      ul.appendChild(li);
+    });
+    c.appendChild(ul);
+    if (exn !== null && exn > list.length) c.appendChild(el("p", "hint more", "외 " + (exn - list.length) + "곳 – 부모 관리 앱에서"));
+    register("unb", c);
+    return c;
+  }
+
+  // 보호 (v0.10.0): 아이 계정 + 노트북 전체
+  function renderProt(main) {
+    var kid = card("이 아이 계정", "아이가 보호를 피하지 못하게 막습니다.");
+    [["tm", "작업 관리자 막기", "KidGuard 를 끄려고 작업 관리자를 여는 것을 막습니다"],
+     ["cmd", "명령 프롬프트(cmd) 막기", null],
+     ["reg", "레지스트리 편집기 막기", null]].forEach(function (x) {
+      var it = el("div", "item");
+      it.appendChild(toggle(x[1], S.cur[x[0]], function (on) { update(x[0], on); }, x[2]));
+      register(x[0], it);
+      kid.appendChild(it);
+    });
+    main.appendChild(kid);
+    var pc = card("노트북 전체", "노트북 전체 설정이라 모든 아이에게 똑같이 적용됩니다.");
+    [["elev", "관리자 권한 창 바로 거부", "아이 계정에서 관리자 비밀번호 창을 띄우지 않고 거부합니다"],
+     ["pua", "원치 않는 앱(PUA) 차단", "Windows Defender 가 끼워팔기 설치 파일을 막습니다"]].forEach(function (x) {
+      var it = el("div", "item");
+      it.appendChild(toggle(x[1], S.cur[x[0]], function (on) { update(x[0], on); }, x[2]));
+      register(x[0], it);
+      pc.appendChild(it);
+    });
+    main.appendChild(pc);
+  }
+
+  // 목록 + 지금 값 (목록에 없으면 넣어 둔다)
+  function numOpts(list, cur, fmt) {
+    var vals = list.slice();
+    if (C.intOrNull(cur) !== null && vals.indexOf(cur) < 0) { vals.push(cur); vals.sort(function (a, b) { return a - b; }); }
+    return vals.map(function (v) { return [v, fmt(v)]; });
+  }
+
+  // 화면 기록 (v0.10.0): 켜기는 아이별, 기록 설정은 노트북 전체. 켜면 아이에게 늘 알린다 (안내를 끄는 설정은 없음).
+  function renderCap(main) {
+    var c = card("화면 기록", "켜면 정해진 간격으로 아이 화면을 찍어 노트북에 보관합니다.");
+    var ce = el("div", "item");
+    ce.appendChild(toggle("화면 기록 켜기", S.cur.ce, function (on) { update("ce", on); },
+      "켜면 아이 화면에 '화면이 부모님께 전달될 수 있다'는 안내가 한 번 뜨고, 트레이에 '🔴 화면 기록 켜짐' 이 늘 보입니다"));
+    register("ce", ce);
+    c.appendChild(ce);
+    main.appendChild(c);
+    var g = card("기록 설정 (노트북 전체)", "모든 아이에게 똑같이 적용됩니다.");
+    function sel(key, label, list, fmt) {
+      var it = el("div", "item");
+      it.appendChild(fieldRow(label, select(numOpts(list, S.cur[key], fmt), S.cur[key], function (v) { update(key, +v); }, label)));
+      register(key, it);
+      g.appendChild(it);
+    }
+    sel("iv", "자동 캡처 간격", [1, 2, 3, 5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 240], function (v) { return C.fmtDuration(v) + "마다"; });
+    sel("q", "사진 화질", [30, 40, 50, 60, 70, 80, 90, 95], function (v) { return String(v); });
+    sel("edge", "사진 크기 (긴 변)", [640, 960, 1280, 1600, 1920, 2560, 3840], function (v) { return v + "px"; });
+    sel("mb", "보관 용량", [500, 1024, 2048, 4096, 8192, 10240, 20480], function (v) { return v >= 1024 && v % 1024 === 0 ? (v / 1024) + "GB" : v + "MB"; });
+    var ob = el("div", "item");
+    ob.appendChild(toggle("막힌 순간도 찍기", S.cur.ob, function (on) { update("ob", on); }, "막힌 사이트·차단·우회 시도가 있으면 그 순간도 한 장"));
+    register("ob", ob);
+    g.appendChild(ob);
+    main.appendChild(g);
+  }
+
   function renderOpts(main) {
     if (S.kind === "kg2" && (S.bySec.time || S.bySec.apps || S.bySec.sites)) {
-      main.appendChild(el("p", "note", "⚙️ 알림·DNS 는 노트북 전체 설정이라 모든 아이에게 똑같이 적용됩니다."));
+      main.appendChild(el("p", "note", "⚙️ 기타 탭은 노트북 전체 설정이라 모든 아이에게 똑같이 적용됩니다."));
+    }
+    if ("act" in S.cur || "gr" in S.cur) {
+      var end = card("시간이 끝났을 때");
+      if ("act" in S.cur) {
+        var act = el("div", "item");
+        act.appendChild(fieldRow("동작", select([["Lock", "화면 잠금"], ["Logoff", "로그오프 (열린 앱 닫힘)"]], S.cur.act, function (v) { update("act", v); }, "시간이 끝났을 때 동작")));
+        register("act", act);
+        end.appendChild(act);
+      }
+      if ("gr" in S.cur) {
+        var gr = el("div", "item");
+        gr.appendChild(fieldRow("잠그기 전 기다림", select(numOpts([10, 15, 20, 30, 45, 60, 90, 120, 180, 300, 600], S.cur.gr, function (v) { return v + "초"; }),
+          S.cur.gr, function (v) { update("gr", +v); }, "잠그기 전 기다리는 시간")));
+        register("gr", gr);
+        end.appendChild(gr);
+      }
+      main.appendChild(end);
+    }
+    if ("tz" in S.cur) {
+      var tzc = card("시간대", "규칙 계산에 쓰는 시간대입니다. 바꾸면 오늘 사용 시간·잠자는 시간 계산이 바뀔 수 있습니다.");
+      var zones = C.TIME_ZONES.map(function (z) { return [z[0], z[1]]; });
+      if (!zones.some(function (z) { return z[0] === S.base.tz; })) zones.unshift([S.base.tz, C.safeText(S.base.tz) + " (지금 값)"]);
+      var tz = el("div", "item");
+      tz.appendChild(fieldRow("시간대", select(zones, S.cur.tz, function (v) { update("tz", v); }, "시간대")));
+      register("tz", tz);
+      tzc.appendChild(tz);
+      main.appendChild(tzc);
     }
     var dnsCard = card("가족용 DNS", "노트북 전체에서 성인·위험 사이트를 한 번 더 막습니다.");
     var dns = el("div", "item");
@@ -769,7 +1017,9 @@
     var al = card("알림");
     [["nt", "우회 시도 알림", "아이가 보호를 피하려 하면 알립니다"],
      ["no", "인터넷 끊김 알림", "노트북이 오래 연결되지 않으면 알립니다"],
-     ["nl", "부모 앱 로그인 알림", "부모 관리 앱에 누가 들어가면 알립니다"]].forEach(function (x) {
+     ["nl", "부모 앱 로그인 알림", "부모 관리 앱에 누가 들어가면 알립니다"],
+     ["ncm", "카메라·마이크 사용 알림", "아이 계정에서 카메라·마이크를 쓰면 알립니다"]].forEach(function (x) {
+      if (!(x[0] in S.cur)) return;
       var it = el("div", "item");
       it.appendChild(toggle(x[1], S.cur[x[0]], function (on) { update(x[0], on); }, x[2]));
       register(x[0], it);
@@ -1004,9 +1254,10 @@
 
   // ---------- 시작 ----------
 
-  var SEC_TITLE = { time: "⏰ 시간", apps: "📱 앱", sites: "🌐 사이트", opts: "⚙️ 알림·DNS" };
-  var TAB_ORDER = ["time", "apps", "sites", "rep", "opts"];
-  var TAB_INFO = { time: ["⏰", "시간"], apps: ["📱", "앱"], sites: ["🌐", "사이트"], rep: ["📊", "기록"], opts: ["⚙️", "알림"] };
+  var SEC_TITLE = { time: "⏰ 시간", apps: "📱 앱", sites: "🌐 사이트", prot: "🛡️ 보호", cap: "📷 화면 기록", opts: "⚙️ 알림·DNS" };
+  // v0.10.0: ⏰ 시간 · 📱 앱 · 🌐 사이트 · 🛡️ 보호 · 📷 화면 기록 · ⚙️ 기타 · 📊 기록
+  var TAB_ORDER = ["time", "apps", "sites", "prot", "cap", "opts", "rep"];
+  var TAB_INFO = { time: ["⏰", "시간"], apps: ["📱", "앱"], sites: ["🌐", "사이트"], prot: ["🛡️", "보호"], cap: ["📷", "화면 기록"], opts: ["⚙️", "기타"], rep: ["📊", "기록"] };
 
   function showFatal(title, text) {
     var app = document.getElementById("app");
@@ -1034,6 +1285,8 @@
     if (sec === "time") renderTime(main);
     else if (sec === "apps") renderApps(main);
     else if (sec === "sites") renderSites(main);
+    else if (sec === "prot") renderProt(main);
+    else if (sec === "cap") renderCap(main);
     else if (sec === "rep") renderReport(main);
     else renderOpts(main);
   }
@@ -1043,7 +1296,7 @@
     var app = document.getElementById("app");
     clear(app);
     var head = el("header", "top");
-    var child = !!(S.bySec.time || S.bySec.apps || S.bySec.sites);
+    var child = !!(S.bySec.time || S.bySec.apps || S.bySec.sites || S.bySec.prot || S.bySec.cap);
     if (S.kind === "kg1") {
       var d = S.secs[0].d;
       var who = d.sec === "opts" ? "전체 설정" : C.safeText(d.n || d.u);
@@ -1079,7 +1332,7 @@
     if (S.kind === "kg2" && (S.rep || S.repn)) names.push("rep");
     names = TAB_ORDER.filter(function (n) { return names.indexOf(n) >= 0; });
     if (S.kind === "kg2" && names.length > 1) {
-      var tabs = el("nav", "tabs");
+      var tabs = el("nav", "tabs" + (names.length > 5 ? " many" : ""));
       tabs.setAttribute("role", "tablist");
       names.forEach(function (n) {
         var b = button("", "tab", function () { showTab(n); });

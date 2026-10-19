@@ -423,3 +423,25 @@ button { font: inherit; cursor: pointer; }
   .btn-x-small { min-width: 40px; }
 }
 .note.bad-note { background: var(--err-bg); color: var(--err-text); }
+
+/* ---------- v0.10.0: 탭 7개, 앱 한꺼번에·규칙 빼기·노트북에서 찾기, 막은 사이트 풀기 ---------- */
+.tabs.many { gap: 2px; padding: 2px; }
+.tabs.many .tab { padding: 4px 0 3px; }
+.tabs.many .tab-icon { font-size: 17px; }
+.tabs.many .tab-label { font-size: 11px; white-space: normal; line-height: 1.1; text-align: center; word-break: keep-all; }
+.pick { display: inline-flex; align-items: center; gap: 4px; min-height: 32px; font-size: 13px; color: var(--link); }
+.pick input { width: 20px; height: 20px; }
+.bulk { margin: 4px 0 8px; padding: 8px 10px; border-radius: 10px; background: var(--ctl-bg); }
+.bulk-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.bulk-row .btn-light { margin: 4px 0; }
+.bulk-count { flex: 1 1 100%; font-size: 13px; font-weight: 700; }
+.del-box { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+.del-box .hint { margin: 0; font-size: 13px; }
+.app.deleted .app-head, .app.deleted .row, .app.deleted .limit { opacity: 0.45; text-decoration: line-through; }
+.lsearch { margin: 0 0 8px; }
+.search-msg { margin: 6px 0 0; font-size: 13px; font-weight: 700; }
+.search-msg.bad { color: var(--red); }
+.search-msg.good { color: var(--good-text); }
+.ex-text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+.btn-unb { margin: 0; flex: 0 0 auto; }
+.srow.deleted .ex-text { opacity: 0.45; text-decoration: line-through; }

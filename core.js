@@ -4,12 +4,28 @@
 
 (function (root) {
   var MAX_BYTES = 4096;
-  var MAX_KEYS = 60;
+  // 구역 하나에 바꿀 수 있는 키 수 (v0.10.0: 앱 여러 개 한꺼번에 바꾸기 때문에 60 → 120, 노트북 PanelChanges.MaxKeys 와 같음)
+  var MAX_KEYS = 120;
+  // 예전(v0.9.x) 노트북은 구역 하나에 60개까지만 받는다. 앱 구역이 예전 모양(객체 줄, d.del 없음)이면 60 (R2 검토: 새 화면 + 예전 노트북)
+  var OLD_MAX_KEYS = 60;
+  function maxKeysFor(d) { return d && d.sec === "apps" && d.del !== true ? OLD_MAX_KEYS : MAX_KEYS; }
+  var MAX_QUERY = 40;
   // 풀어낸 값의 최대 크기 (압축 폭탄 막기). 노트북 주소는 4000자 이하라 보통 수십 KB.
   var MAX_JSON_BYTES = 512 * 1024;
   var DAY_NAMES = ["", "월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"];
   var WEEKDAY_NAMES = ["일요일", "월요일", "화요일", "수요일", "목요일", "금요일", "토요일"];
-  var SECTIONS = ["time", "apps", "sites", "opts"];
+  var SECTIONS = ["time", "apps", "sites", "prot", "cap", "opts"];
+  // opts tz (v0.10.0): 노트북 PanelTimeZones.Common 과 같은 id·이름 (Windows 시간대 id)
+  var TIME_ZONES = [
+    ["Korea Standard Time", "한국 (서울)"], ["Tokyo Standard Time", "일본 (도쿄)"], ["China Standard Time", "중국 (베이징)"],
+    ["Taipei Standard Time", "대만 (타이베이)"], ["Singapore Standard Time", "싱가포르"], ["SE Asia Standard Time", "베트남·태국 (하노이·방콕)"],
+    ["AUS Eastern Standard Time", "호주 동부 (시드니)"], ["GMT Standard Time", "영국 (런던)"], ["W. Europe Standard Time", "서유럽 (베를린·파리)"],
+    ["Eastern Standard Time", "미국 동부 (뉴욕)"], ["Central Standard Time", "미국 중부 (시카고)"], ["Pacific Standard Time", "미국 서부 (LA)"]
+  ];
+  function tzName(id) {
+    for (var i = 0; i < TIME_ZONES.length; i++) if (TIME_ZONES[i][0] === id) return TIME_ZONES[i][1];
+    return safeText(id);
+  }
 
   // ---------- 주소(#) 읽기 ----------
 
@@ -168,6 +184,7 @@
       });
       o.v = 1;
       if (o.sec === "time" && o.today === undefined && typeof d.today === "string") o.today = d.today;
+      if (o.sec === "apps") normApps(o);
       var p = checkLaunch(o);
       if (p) { problems.push("구역 " + (i + 1) + ": " + p); return; }
       if (seen[o.sec]) { problems.push("구역 " + (i + 1) + ": 같은 구역이 두 번 있습니다"); return; }
@@ -176,6 +193,24 @@
     });
     out.sort(function (a, b) { return SECTIONS.indexOf(a.sec) - SECTIONS.indexOf(b.sec); });
     return { secs: out, problems: problems };
+  }
+
+  // ---------- 앱 목록 (v0.10.0 짧은 모양) ----------
+
+  // 앱 줄을 객체 {id,n,c,m,l,ro} 로 맞춘다 (d.apps 를 바꾼다). v0.10.0 노트북은 [id, 이름, 카테고리 번호(cats 순서), 모드, 한도, ro 0|1]
+  // 배열로 보내고, 예전 노트북은 객체로 보낸다. 배열로 받았으면 d.del = true (규칙 빼기 del:<id> 를 노트북이 받음).
+  function normApps(d) {
+    if (!d || !Array.isArray(d.apps)) return d;
+    var cats = Array.isArray(d.cats) ? d.cats : [];
+    var compact = false;
+    d.apps = d.apps.map(function (a) {
+      if (!Array.isArray(a)) return a;
+      compact = true;
+      var ci = isInt(a[2]) && a[2] >= 0 && a[2] < cats.length && cats[a[2]] && typeof cats[a[2]].c === "string" ? cats[a[2]].c : "기타";
+      return { id: a[0], n: a[1], c: ci, m: a[3], l: a[4], ro: a[5] === 1 || a[5] === true };
+    });
+    if (compact) d.del = true;
+    return d;
   }
 
   // ---------- 작은 도우미 ----------
@@ -301,19 +336,32 @@
         if (!c || typeof c.c !== "string" || Object.prototype.hasOwnProperty.call(b, "cat:" + c.c)) return;
         b["cat:" + c.c] = { m: ["t", "a", "b"].indexOf(c.m) >= 0 ? c.m : "t", l: intOrNull(c.l) };
       });
+      normApps(d);
       (Array.isArray(d.apps) ? d.apps : []).forEach(function (a) {
         if (!a || typeof a.id !== "string" || a.ro === true || Object.prototype.hasOwnProperty.call(b, "app:" + a.id)) return;
         b["app:" + a.id] = { m: ["f", "t", "a", "b"].indexOf(a.m) >= 0 ? a.m : "f", l: intOrNull(a.l) };
       });
       b.na = ["Ask", "AllowAndNotify", "Block"].indexOf(d.na) >= 0 ? d.na : "Ask";
       b.st = boolOr(d.st, true);
+      // 규칙 빼기 (v0.10.0 노트북만 받음): false = 그대로
+      if (d.del === true) Object.keys(b).forEach(function (k) { if (k.indexOf("app:") === 0) b["del:" + k.slice(4)] = false; });
     } else if (d.sec === "sites") {
       b.ss = boolOr(d.ss, false);
       b.pb = boolOr(d.pb, false);
       b.ad = boolOr(d.ad, false);
       b.bl = normalizeSiteList(Array.isArray(d.bl) ? d.bl : []);
       b.al = normalizeSiteList(Array.isArray(d.al) ? d.al : []);
-      // 텔레그램·자동으로 막은 사이트는 개수(exn)만 받는다 (§1.8). 풀기는 화면에서 하지 않는다.
+      // 텔레그램·자동으로 막은 사이트: v0.10.0 노트북은 목록(exl)도 보낸다 → [풀기] = unb (예전 노트북은 개수 exn 만, 풀기 없음)
+      if (Array.isArray(d.exl)) b.unb = [];
+    } else if (d.sec === "prot") {
+      ["tm", "cmd", "reg", "elev", "pua"].forEach(function (k) { b[k] = boolOr(d[k], true); });
+    } else if (d.sec === "cap") {
+      b.ce = boolOr(d.ce, false);
+      b.iv = intOr(d.iv, 10);
+      b.q = intOr(d.q, 70);
+      b.edge = intOr(d.edge, 1920);
+      b.mb = intOr(d.mb, 2048);
+      b.ob = boolOr(d.ob, true);
     } else if (d.sec === "opts") {
       b.dns = ["None", "Cloudflare", "CleanBrowsing"].indexOf(d.dns) >= 0 ? d.dns : "None";
       b.rt = isHHmm(d.rt) ? d.rt : "";
@@ -321,6 +369,11 @@
       b.nt = boolOr(d.nt, true);
       b.no = boolOr(d.no, true);
       b.nl = boolOr(d.nl, true);
+      // v0.10.0 노트북만 보내는 키 (예전 노트북에는 없으니 키도 만들지 않는다: 바꿔 보내면 거절되므로)
+      if (typeof d.act === "string") b.act = d.act === "Logoff" ? "Logoff" : "Lock";
+      if (isInt(d.gr)) b.gr = d.gr;
+      if (typeof d.tz === "string") b.tz = d.tz;
+      if (typeof d.ncm === "boolean") b.ncm = d.ncm;
     }
     return b;
   }
@@ -336,7 +389,7 @@
 
   // 비교용 모양: 사이트 목록은 순서 무시.
   function canon(key, v) {
-    if ((key === "bl" || key === "al") && Array.isArray(v)) return JSON.stringify(normalizeSiteList(v).slice().sort());
+    if ((key === "bl" || key === "al" || key === "unb") && Array.isArray(v)) return JSON.stringify(normalizeSiteList(v).slice().sort());
     return JSON.stringify(v);
   }
 
@@ -351,7 +404,7 @@
   }
 
   function outValue(k, v) {
-    if (k === "bl" || k === "al") return normalizeSiteList(v);
+    if (k === "bl" || k === "al" || k === "unb") return normalizeSiteList(v);
     if (/^d[1-7]$/.test(k)) return { l: v.l, w: uniq(v.w.map(normWindowText)) };
     return clone(v);
   }
@@ -391,7 +444,21 @@
       case "mr": return rangeOrNull(v, 0, 100) ? null : "하루 요청 횟수는 0~100번이어야 합니다.";
       case "mx": return rangeOrNull(v, 0, 1440) ? null : "하루 연장 최대는 0분~24시간이어야 합니다.";
       case "co": case "aa": case "st": case "ss": case "pb": case "ad": case "nt": case "no": case "nl":
+      case "ncm": case "tm": case "cmd": case "reg": case "elev": case "pua": case "ce": case "ob":
         return typeof v === "boolean" ? null : "형식이 잘못되었습니다.";
+      // 범위는 부모 관리 앱 입력 칸(유예 10~600초)·노트북 CaptureSettings.Normalize 와 같다.
+      case "act": return v === "Lock" || v === "Logoff" ? null : "시간이 끝났을 때 동작 값이 잘못되었습니다.";
+      case "gr": return rangeOk(v, 10, 600) ? null : "잠그기 전 기다리는 시간은 10~600초여야 합니다.";
+      case "tz": return typeof v === "string" && v.length > 0 && v.length <= 64 && /^[A-Za-z0-9 .\-+()_]+$/.test(v) ? null : "시간대 값이 잘못되었습니다.";
+      case "iv": return rangeOk(v, 1, 240) ? null : "자동 캡처 간격은 1~240분이어야 합니다.";
+      case "q": return rangeOk(v, 30, 95) ? null : "사진 화질은 30~95여야 합니다.";
+      case "edge": return rangeOk(v, 640, 3840) ? null : "사진 크기는 640~3840px 이어야 합니다.";
+      case "mb": return rangeOk(v, 500, 20480) ? null : "보관 용량은 500~20480MB 여야 합니다.";
+      case "unb":
+        if (!Array.isArray(v)) return "풀 사이트: 형식이 잘못되었습니다.";
+        if (v.length > 300) return "풀 사이트는 300개까지입니다.";
+        for (var u = 0; u < v.length; u++) { var up = siteProblem(v[u]); if (up) return "풀 사이트 '" + v[u] + "': " + up + "."; }
+        return null;
       case "na": return ["Ask", "AllowAndNotify", "Block"].indexOf(v) >= 0 ? null : "새 프로그램 처리 값이 잘못되었습니다.";
       case "dns": return ["None", "Cloudflare", "CleanBrowsing"].indexOf(v) >= 0 ? null : "가족용 DNS 값이 잘못되었습니다.";
       case "rt": return v === "" || isClock(v) ? null : "매일 리포트 시각이 잘못되었습니다.";
@@ -411,6 +478,7 @@
       if (!rangeOrNull(v.l, 1, 1440)) return k.slice(4) + ": 하루 한도는 1분~24시간이어야 합니다.";
       return null;
     }
+    if (k.indexOf("del:") === 0) return typeof v === "boolean" ? null : appName(d, k.slice(4)) + ": 규칙 빼기 값이 잘못되었습니다.";
     if (k.indexOf("app:") === 0) {
       var an = appName(d, k.slice(4));
       if (!v || ["f", "t", "a", "b"].indexOf(v.m) < 0) return an + ": 방식이 잘못되었습니다.";
@@ -431,6 +499,9 @@
     var errs = {};
     Object.keys(ch).forEach(function (k) {
       var e = validateKey(k, ch[k], d);
+      // 같은 앱을 바꾸면서 규칙을 빼면 노트북이 받지 않는다 (화면은 빼기를 고르면 바꾼 것을 되돌린다)
+      if (!e && k.indexOf("del:") === 0 && ch[k] === true && Object.prototype.hasOwnProperty.call(ch, "app:" + k.slice(4)))
+        e = appName(d, k.slice(4)) + ": 바꾸기와 규칙 빼기를 함께 보낼 수 없습니다.";
       if (e) errs[k] = e;
     });
     return errs;
@@ -511,7 +582,22 @@
       case "rt": return oldV !== "" && newV === "" ? "매일 리포트를 끕니다" : null;
       case "wd": return oldV !== null && newV === null ? "주간 리포트를 끕니다" : null;
       case "dns": return oldV !== "None" && newV === "None" ? "가족용 DNS 를 끕니다" : null;
-      case "nt": case "no": case "nl": return oldV && !newV ? "알림을 끕니다" : null;
+      case "nt": case "no": case "nl": case "ncm": return oldV && !newV ? "알림을 끕니다" : null;
+      case "tm": return oldV && !newV ? "작업 관리자를 쓸 수 있게 됩니다" : null;
+      case "cmd": return oldV && !newV ? "명령 프롬프트를 쓸 수 있게 됩니다" : null;
+      case "reg": return oldV && !newV ? "레지스트리 편집기를 쓸 수 있게 됩니다" : null;
+      case "elev": return oldV && !newV ? "아이 계정에 관리자 비밀번호 창이 뜹니다" : null;
+      case "pua": return oldV && !newV ? "원치 않는 앱(PUA) 차단을 끕니다" : null;
+      case "act": return oldV === "Logoff" && newV === "Lock" ? "로그오프 대신 화면 잠금 (열린 앱이 남음)" : null;
+      case "gr": return newV > oldV ? "잠그기 전 기다리는 시간이 늘어납니다" : null;
+      case "unb": return Array.isArray(newV) && newV.length ? "막은 사이트를 풉니다" : null;
+      // 화면 기록(ce·iv·q·edge·mb·ob)은 보는 것이라 약해지지 않는다. 시간대(tz)는 확인 글에 따로.
+    }
+    if (k.indexOf("del:") === 0) {
+      // 사용 불가 규칙을 빼면 그 프로그램을 다시 쓸 수 있게 된다 (노트북과 같은 규칙)
+      if (newV !== true) return null;
+      var am = ctx && ctx.appMode ? ctx.appMode(k.slice(4)) : null;
+      return am === "b" ? "사용 불가 규칙을 뺍니다" : null;
     }
     if (k.indexOf("cat:") === 0 || k.indexOf("app:") === 0) {
       var catOf = function (v) {
@@ -556,7 +642,7 @@
     if (!keys.length) return { text: "", bytes: 0, error: "바뀐 것이 없습니다." };
     var text = JSON.stringify(payloadObject(d, ch));
     var bytes = utf8Length(text);
-    if (keys.length > MAX_KEYS || bytes > MAX_BYTES) return { text: text, bytes: bytes, error: TOO_MUCH };
+    if (keys.length > maxKeysFor(d) || bytes > MAX_BYTES) return { text: text, bytes: bytes, error: TOO_MUCH };
     return { text: text, bytes: bytes, error: null };
   }
 
@@ -567,7 +653,7 @@
     (list || []).forEach(function (x) {
       if (!x || !x.d || !x.ch || !Object.keys(x.ch).length) return;
       if (secs.indexOf(x.d.sec) >= 0) { error = "같은 구역을 두 번 보낼 수 없습니다."; return; }
-      if (Object.keys(x.ch).length > MAX_KEYS) error = TOO_MUCH;
+      if (Object.keys(x.ch).length > maxKeysFor(x.d)) error = TOO_MUCH;
       secs.push(x.d.sec);
       items.push(payloadObject(x.d, x.ch));
     });
@@ -581,6 +667,27 @@
 
   // 최신 값 받기 (§7.4)
   var REFRESH_TEXT = JSON.stringify({ v: 2, rf: 1 });
+
+  // 앱 검색 (v0.10.0 §8): 노트북이 그 아이의 앱 목록을 검색 결과로 담은 버튼을 새로 보낸다. 빈 글 = 전체 목록으로. {text, error}
+  function searchText(q, sid) {
+    var t = String(q === undefined || q === null ? "" : q).trim();
+    if (t.length > MAX_QUERY) return { text: "", error: "찾을 이름은 " + MAX_QUERY + "자까지입니다." };
+    if (/[\u0000-\u001f\u007f-\u009f]/.test(t) || FORMAT_CHAR.test(t)) return { text: "", error: "찾을 이름에 쓸 수 없는 글자가 있습니다." };
+    if (typeof sid !== "string" || !/^[0-9a-f]{16}$/.test(sid)) return { text: "", error: GENERIC_PROBLEM };
+    return { text: JSON.stringify({ v: 2, q: t, sec: "apps", sid: sid }), error: null };
+  }
+
+  // 막은 사이트 목록 (exl, v0.10.0): [[사이트, "MM-dd", "t"|"a"]] → [{s, d, t}] (모양이 틀린 줄은 뺀다, 최대 50)
+  function normExtra(list) {
+    var out = [];
+    if (!Array.isArray(list)) return out;
+    for (var i = 0; i < list.length && out.length < 50; i++) {
+      var a = list[i];
+      if (!Array.isArray(a) || typeof a[0] !== "string" || !a[0]) continue;
+      out.push({ s: normalizeSite(a[0]), d: typeof a[1] === "string" && /^\d{2}-\d{2}$/.test(a[1]) ? a[1] : "", t: a[2] === "t" });
+    }
+    return out;
+  }
 
   // ---------- 최신 값 알리기 (§7.5) ----------
 
@@ -721,7 +828,7 @@
   }
 
   var api = {
-    MAX_BYTES: MAX_BYTES, MAX_KEYS: MAX_KEYS, DAY_NAMES: DAY_NAMES, WEEKDAY_NAMES: WEEKDAY_NAMES,
+    MAX_BYTES: MAX_BYTES, MAX_KEYS: MAX_KEYS, OLD_MAX_KEYS: OLD_MAX_KEYS, maxKeysFor: maxKeysFor, DAY_NAMES: DAY_NAMES, WEEKDAY_NAMES: WEEKDAY_NAMES,
     extractKg1: extractKg1, hashParam: hashParam, parseThemeParams: parseThemeParams, luminance: luminance,
     base64UrlToBytes: base64UrlToBytes, hasDecompression: hasDecompression, decodeLaunch: decodeLaunch, checkLaunch: checkLaunch,
     pad2: pad2, fmtMinute: fmtMinute, parseMinute: parseMinute, isHHmm: isHHmm, parseWindow: parseWindow, fmtWindow: fmtWindow,
@@ -732,6 +839,7 @@
     SECTIONS: SECTIONS, safeText: safeText, extractTag: extractTag, extractKg2: extractKg2, extractLaunch: extractLaunch,
     checkLaunch2: checkLaunch2, splitLaunch2: splitLaunch2, payloadObject: payloadObject, buildPayload2: buildPayload2,
     REFRESH_TEXT: REFRESH_TEXT, atClock: atClock, freshness: freshness,
+    MAX_QUERY: MAX_QUERY, TIME_ZONES: TIME_ZONES, tzName: tzName, normApps: normApps, searchText: searchText, normExtra: normExtra,
     normReport: normReport, fmtSeconds: fmtSeconds, fmtClock: fmtClock, fmtChange: fmtChange, bedHours: bedHours, visitMarks: visitMarks
   };
 
